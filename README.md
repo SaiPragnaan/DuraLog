@@ -25,7 +25,11 @@ ctest --test-dir build --output-on-failure
 ./build/duralog benchmark group 100000 64 10
 ./build/duralog benchmark none 100000
 
+./build/duralog sweep-group 100000 10 > group-commit-sweep.csv
+
 ./build/duralog crash-test group 100 12345 50 64 10
+
+./build/duralog crash-test none 100 12345 50 --drop-cache
 ```
 
 Policies are `sync` (`fdatasync` each append), `group` (`fdatasync` after N
@@ -38,8 +42,9 @@ the shared counter; `unobserved_ack_race` makes that visible instead of hiding i
 ## Important experiment boundary
 
 `SIGKILL` is an abrupt process-death test, not a power-failure test: it does
-not discard Linux page-cache data. It exercises record framing, checksums, and
-the recovery path, but it cannot by itself measure data that would be lost if
-the machine or storage device lost power. Treat `no-sync` crash results as a
-process-crash baseline; use a VM/device-level power-failure setup for physical
+not discard Linux page-cache data. `--drop-cache` requests
+`POSIX_FADV_DONTNEED` after the kill so replay should not merely use a warm read
+cache; it still is *not* a power-cut simulation, because the kernel may write
+dirty data back before evicting it. These modes exercise record framing,
+checksums, and recovery. Use a VM/device-level power-failure setup for physical
 durability claims.

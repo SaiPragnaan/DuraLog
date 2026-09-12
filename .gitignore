@@ -1,3 +1,4 @@
 plans/
 build/
 *.wal
+group-commit-sweep.csv

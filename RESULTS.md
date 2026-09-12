@@ -36,3 +36,26 @@ These zeroes do **not** prove no-sync durability: `SIGKILL` terminates the
 writer but does not discard the host OS page cache. This validates abrupt
 process-recovery behavior only. A VM/device-level power-cut setup is required
 before claiming an empirical disk-durability loss window.
+
+## Group-commit sweep (10,000 writes, 10 ms interval)
+
+| Group size | Writes/s | p50 append | p99 append |
+| ---: | ---: | ---: | ---: |
+| 1 | 1,916.36 | 495.58 us | 923.77 us |
+| 4 | 7,096.14 | 26.44 us | 705.83 us |
+| 16 | 19,144.44 | 18.01 us | 614.95 us |
+| 64 | 63,655.26 | 6.79 us | 385.93 us |
+| 256 | 118,692.94 | 5.77 us | 15.31 us |
+
+Reproduce or generate CSV suitable for plotting with:
+
+```bash
+./build/duralog sweep-group 100000 10 > group-commit-sweep.csv
+```
+
+## Cold-replay diagnostic
+
+A three-trial no-sync run using `--drop-cache` recovered a mean 262 records
+and reported zero loss lower bound. This does not change the power-loss caveat:
+`POSIX_FADV_DONTNEED` can cause dirty data to be written back before eviction,
+so it is a cold-read diagnostic rather than a disk-failure simulation.

@@ -1,10 +1,12 @@
 #include "duralog/wal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <random>
@@ -61,6 +63,17 @@ namespace
     return {writes / elapsed, percentile(.50), percentile(.99)};
   }
 
+  void drop_file_cache(const std::filesystem::path &log)
+  {
+    const int fd = ::open(log.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+      throw std::system_error(errno, std::generic_category(), "open WAL to advise cache drop");
+    const int result = ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    ::close(fd);
+    if (result != 0)
+      throw std::system_error(result, std::generic_category(), "advise WAL cache drop");
+  }
+
   [[noreturn]] void writer(const std::filesystem::path &log, duralog::WalOptions options, std::atomic<std::uint64_t> *claimed)
   {
     duralog::Wal wal(log, options);
@@ -99,7 +112,8 @@ namespace
     std::cerr << "Usage:\n"
               << "  duralog replay <log> [--truncate]\n"
               << "  duralog benchmark <sync|group|none> [writes] [group-size] [group-ms]\n"
-              << "  duralog crash-test <sync|group|none> <trials> <seed> [max-delay-ms] [group-size] [group-ms]\n";
+              << "  duralog sweep-group [writes] [group-ms]\n"
+              << "  duralog crash-test <sync|group|none> <trials> <seed> [max-delay-ms] [group-size] [group-ms] [--drop-cache]\n";
   }
 }
 
@@ -153,9 +167,31 @@ int main(int argc, char **argv)
                 << " p50_us=" << result.p50_us << " p99_us=" << result.p99_us << '\n';
       return 0;
     }
+    if (command == "sweep-group")
+    {
+      if (argc > 4)
+      {
+        usage();
+        return 2;
+      }
+      const std::size_t writes = argc >= 3 ? std::stoull(argv[2]) : 100000;
+      const auto interval = std::chrono::milliseconds(argc >= 4 ? std::stoull(argv[3]) : 10);
+      constexpr std::array<std::size_t, 5> kGroupSizes{1, 4, 16, 64, 256};
+      std::cout << "group_size,group_ms,writes,writes_per_sec,p50_us,p99_us\n";
+      for (const auto group_size : kGroupSizes)
+      {
+        const duralog::WalOptions options{.policy = CommitPolicy::GroupCommit, .group_size = group_size, .group_interval = interval};
+        const auto result = benchmark("duralog-sweep-" + std::to_string(group_size) + ".wal", options, writes);
+        std::cout << std::fixed << std::setprecision(2) << group_size << ',' << interval.count() << ',' << writes << ','
+                  << result.writes_per_second << ',' << result.p50_us << ',' << result.p99_us << '\n';
+      }
+      return 0;
+    }
     if (command == "crash-test")
     {
-      if (argc < 5 || argc > 8)
+      const bool drop_cache = argc >= 6 && std::string(argv[argc - 1]) == "--drop-cache";
+      const int positional_end = argc - (drop_cache ? 1 : 0);
+      if (positional_end < 5 || positional_end > 8)
       {
         usage();
         return 2;
@@ -164,10 +200,10 @@ int main(int argc, char **argv)
       options.policy = parse_policy(argv[2]);
       const auto trials = std::stoull(argv[3]);
       std::mt19937_64 random(std::stoull(argv[4]));
-      const auto max_delay = argc >= 6 ? std::stoull(argv[5]) : 50;
-      if (argc >= 7)
+      const auto max_delay = positional_end >= 6 ? std::stoull(argv[5]) : 50;
+      if (positional_end >= 7)
         options.group_size = std::stoull(argv[6]);
-      if (argc >= 8)
+      if (positional_end >= 8)
         options.group_interval = std::chrono::milliseconds(std::stoull(argv[7]));
       std::uint64_t total_recovered = 0;
       std::uint64_t total_lost = 0;
@@ -192,6 +228,8 @@ int main(int argc, char **argv)
         int status = 0;
         if (::waitpid(child, &status, 0) < 0)
           throw std::system_error(errno, std::generic_category(), "wait writer");
+        if (drop_cache)
+          drop_file_cache(log);
         const auto append_claimed = claimed->load(std::memory_order_acquire);
         const auto replay = duralog::Wal::replay(log);
         const auto recovered = replay_in_fresh_process(log);
@@ -208,7 +246,8 @@ int main(int argc, char **argv)
       }
       std::cout << "summary policy=" << duralog::policy_name(options.policy) << " trials=" << trials
                 << " mean_recovered=" << (trials ? static_cast<double>(total_recovered) / trials : 0.0)
-                << " mean_lost=" << (trials ? static_cast<double>(total_lost) / trials : 0.0) << '\n';
+                << " mean_lost=" << (trials ? static_cast<double>(total_lost) / trials : 0.0)
+                << " cache_mode=" << (drop_cache ? "fadvise-dontneed" : "warm") << '\n';
       return 0;
     }
     usage();
